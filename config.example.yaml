@@ -1,5 +1,7 @@
 # Add to ~/.hermes/config.yaml (paths are inside the Hermes container).
+# Copy only the plugins you install.
 mcp_servers:
+  # discord-admin plugin
   discord:
     command: "python3"
     args: ["/opt/data/mcp/discord_admin.py", "--tier", "safe"]
@@ -10,13 +12,14 @@ mcp_servers:
     args: ["/opt/data/mcp/discord_admin.py", "--tier", "danger"]
     trust: untrusted
     timeout: 60
+  # fashion plugin
   fashion:
     command: "python3"
     args: ["/opt/data/mcp/fashion.py"]
     trust: full
     timeout: 180
 
-# Fashion channel: replace 123456789012345678 with your #fits channel ID.
+# fashion plugin: replace 123456789012345678 with your #fits channel ID.
 # If you already have a discord: section, add these keys to it instead.
 discord:
   free_response_channels: "123456789012345678"  # reply without an @mention; comma-separate several
