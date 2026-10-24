@@ -1,4 +1,4 @@
-# hermes-plugins
+# hermes-agents
 
 Plugins that add agents to a [Hermes Agent](https://hermes-agent.nousresearch.com/) running in Docker on a server and talking to you in Discord. Each plugin is a small MCP server in its own folder, using only Python's standard library. Some also come with a Hermes skill.
 
@@ -14,7 +14,7 @@ These steps assume Hermes data lives in `~/.hermes` on the server, mounted at `/
 1. Get the repo onto the server:
 
    ```bash
-   git clone https://github.com/Batata1506/hermes-discord-admin.git
+   git clone https://github.com/Batata1506/hermes-agents.git
    ```
 
 2. Install the plugins you want by following each plugin's README. Plugins are copied into `~/.hermes/mcp/` (and skills into `~/.hermes/skills/`) and owned by root, so the agent can run them but can't edit them.
