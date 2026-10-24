@@ -1,0 +1,12 @@
+# Add to ~/.hermes/config.yaml (paths are inside the Hermes container).
+mcp_servers:
+  discord:
+    command: "python3"
+    args: ["/opt/data/mcp/discord_admin.py", "--tier", "safe"]
+    trust: full
+    timeout: 60
+  discord_danger:
+    command: "python3"
+    args: ["/opt/data/mcp/discord_admin.py", "--tier", "danger"]
+    trust: untrusted
+    timeout: 60
