@@ -2,6 +2,8 @@
 
 Lets a [Hermes Agent](https://hermes-agent.nousresearch.com/) run your Discord server: ask for something in Discord, and Hermes does it.
 
+This repo also has a [fashion stylist plugin](#fashion-stylist).
+
 The plugin is one small Python file, [`discord_admin.py`](discord_admin.py), that runs as an MCP server. It uses only Python's standard library and Discord's official REST API (v10), with no third-party packages.
 
 ## Two tiers
@@ -70,3 +72,69 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"l
 1. Write a function that takes `args` and returns something JSON-serializable. Raise `ToolError` for errors the user should see.
 2. Add it to `SAFE_TOOLS` or `DANGER_TOOLS` with `tool(...)`.
 3. Restart Hermes.
+
+# Fashion stylist
+
+A second plugin that turns Hermes into a personal stylist in its own Discord channel. Ask for an outfit ("something for a pub night, under €150") and it posts:
+
+- an inspiration photo of the full look,
+- a clean store photo of each piece, with the store, price and link. Save a photo and use it in Vinted's photo search to find the piece second-hand.
+
+It learns your style from a short quiz the first time you talk to it, then from what you say about each look ("L12 love it, boots too chunky"). Every two weeks it posts a drop of three new looks, based on your style and current trends.
+
+It has two parts:
+
+| File | What it is |
+|---|---|
+| [`fashion.py`](fashion.py) | MCP server (standard library only). Tools: `get_profile`, `update_profile`, `image_search`, `product_info`, `save_images`, `save_look`, `rate_look`, `recent_looks` |
+| [`skills/fashion-stylist/SKILL.md`](skills/fashion-stylist/SKILL.md) | Hermes skill: the quiz, how to build a look, the reply format, the fortnightly drop, and the stores to use |
+
+It only uses free tools: Hermes's own `web_search` / `web_extract` / `vision_analyze`, plus a free DuckDuckGo image search in the plugin. Prices are in euro, from stores that ship to Ireland.
+
+## Install (Hermes in Docker)
+
+1. Copy the plugin and the skill so that root owns them:
+
+   ```bash
+   sudo cp fashion.py ~/.hermes/mcp/
+   sudo chmod 644 ~/.hermes/mcp/fashion.py
+   sudo mkdir -p ~/.hermes/skills/fashion/fashion-stylist
+   sudo cp skills/fashion-stylist/SKILL.md ~/.hermes/skills/fashion/fashion-stylist/
+   ```
+
+2. Make a `#fits` channel (you can ask Hermes to, with the admin plugin) and copy its ID: in Discord, turn on Developer Mode, then right-click the channel → Copy Channel ID.
+
+3. Add the `fashion` server and the `discord:` block from [`config.example.yaml`](config.example.yaml) to `~/.hermes/config.yaml`, with your channel ID. This lets Hermes reply in `#fits` without an @mention and loads the stylist skill there automatically.
+
+4. Restart Hermes and check the server connects:
+
+   ```bash
+   sudo docker restart hermes
+   sudo docker exec -it -u hermes hermes hermes mcp test fashion
+   ```
+
+5. Set up the fortnightly drop. The 14 days count from when you run this, so run it at the time of day you want the drop:
+
+   ```bash
+   sudo docker exec -it -u hermes hermes hermes cron create "every 14d" "Post this fortnight's style drop." --skill fashion-stylist --deliver discord:123456789012345678
+   ```
+
+6. Say hi in `#fits`. It starts with the style quiz.
+
+## Where things are kept
+
+- Style profile and past looks: `~/.hermes/fashion/` (`profile.json`, `looks.json`).
+- Saved photos: `~/.hermes/cache/images/fashion/`. Hermes can only post files from its cache folders. Photos older than 60 days are deleted when the plugin starts; set `FASHION_KEEP_IMAGE_DAYS` to change that.
+
+## Known limits
+
+- **Image search can pause.** DuckDuckGo shows a bot check if it gets too many searches, and that can last hours. The plugin spaces searches out and stops as soon as it sees a check. Until then, the skill finds products with Hermes's `web_search` instead.
+- **Some stores block reading.** ASOS blocks photo downloads, and ASOS, Zalando, H&M and Mango (and probably others) block `product_info`. The skill then reads prices with `web_extract`, and only suggests ASOS pieces if it can show a photo from elsewhere. Zalando, Zara, Uniqlo, Pinterest and Shopify stores (like END.) photos save fine, and `product_info` reads every photo and price from Shopify stores.
+- It suggests new pieces only; it doesn't know what's in your wardrobe.
+
+## Test without Hermes
+
+```bash
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"product_info","arguments":{"url":"https://www.endclothing.com/ie/products/asics-gel-nyc-sneaker-1203a739-100"}}}' \
+  | HERMES_HOME=/tmp/fashion-test python3 fashion.py
+```
