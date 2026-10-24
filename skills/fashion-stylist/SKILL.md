@@ -15,6 +15,15 @@ Vinted's photo search to find it second-hand. You use the `fashion` MCP tools (n
 `mcp__fashion__*`, e.g. `mcp__fashion__get_profile`) plus your own `web_search`,
 `web_extract` and `vision_analyze`. Below, tools are called by their short names.
 
+**Paid search.** `get_profile` returns `paid_search`. When `enabled` is true and
+`used_this_month` is below `monthly_limit`, you can use `shopping_search` (Google
+Shopping prices), `lens_search` (Google Lens) and `shopping_stores`. Each uses one
+SerpApi search from a small monthly allowance, so spend them where they matter: aim
+for 6 or fewer per look, and once over 80% of the allowance is used, go back to the
+free tools. The free tools (`image_search`, `product_info`, `web_search`,
+`web_extract`) cost nothing. Without paid search, `shopping_search` quietly uses the
+free image search (no prices) and `lens_search` / `shopping_stores` don't work.
+
 ## When to use
 
 - Any message in the fashion channel.
@@ -60,7 +69,19 @@ If they want to change something later, update just that key.
    accessory). Describe each one precisely: colour, material, cut. E.g. "navy wool
    overshirt", "ecru heavyweight tee", "charcoal pleated wide-leg trousers",
    "brown suede loafers".
-4. **Find each piece at a real store.** For each piece:
+4. **Find each piece at a real store.** With paid search on, for each piece:
+   - `lens_search` with `image_url` set to the inspiration photo's `image` link and
+     `query` set to the piece (e.g. "brown loafers"). Pick a match from a store that
+     ships to Ireland; it comes with a full-size photo and the product page. If it has
+     no price, get one with `product_info` on the page (free).
+   - If Lens finds nothing good, or there's no inspiration photo, use
+     `shopping_search` with `max_price` set to the piece's budget. It returns real euro
+     prices. For a full-size photo and the store's own page, try `image_search` with
+     the store's site and the product title (free); if that fails, `shopping_stores`
+     with the result's `product_token`; as a last resort, use the small shopping photo
+     and the Google Shopping link (say "via Google Shopping").
+
+   Without paid search, for each piece:
    - `image_search` with `site:` set to one store from the list below, e.g.
      `{"query": "brown suede loafers men", "site": "zalando.ie"}`. Results include the
      photo link and the product page.
@@ -69,8 +90,9 @@ If they want to change something later, update just that key.
    - If `image_search` says it's paused, use `web_search` (e.g.
      "site:zalando.ie brown suede loafers") and get photos from `product_info` or
      `web_extract`.
-   - Keep the look's total within `budget_per_look` and each piece within
-     `budget_per_piece`, unless the user said otherwise.
+
+   Either way, keep the look's total within `budget_per_look` and each piece within
+   `budget_per_piece`, unless the user said otherwise.
 5. **Pick the right photo of each piece.** The best photo for Vinted's search shows the
    piece on its own on a plain background (a packshot). Second best is a close-up of
    the piece. Avoid photos of a model in a full outfit, which confuse the search.
@@ -100,6 +122,15 @@ MEDIA:/opt/data/cache/images/fashion/2026-10-24/l12-overshirt-5e6f7a8b.jpg
 End with one short line: save the piece photos and use them in Vinted's photo search,
 and reply with the look id plus what they think ("L12 love it, boots too chunky").
 
+## When the user sends a photo
+
+If they send an outfit or piece they like ("find me this"), and paid search is on:
+use `vision_analyze` to name the pieces, then `lens_search` with `image_path` set to
+the photo's saved path and `query` set to each piece you want to match. Show the
+closest matches from Irish stores in the usual reply format, with each piece's photo
+for Vinted. Without paid search, describe the pieces with `vision_analyze` and find
+them as in Step 2.
+
 ## Feedback
 
 When the user reacts to a look, call `rate_look` with their verdict (love, like, meh,
@@ -115,7 +146,8 @@ When the cron job runs:
 2. `web_search` for current trends for their section and the season
    (e.g. "men's fashion trends autumn 2026"). Keep 1-2 that suit their style.
 3. Build 3 looks for different occasions from their profile, at least one using a
-   trend, none repeating recent looks. Follow Step 2 for each.
+   trend, none repeating recent looks. Follow Step 2 for each, using at most 18
+   paid searches for the whole drop.
 4. Open with one line naming the trend(s), then post the three looks as in Step 3.
    Keep each look to 6 photos or fewer.
 

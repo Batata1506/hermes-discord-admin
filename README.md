@@ -86,10 +86,10 @@ It has two parts:
 
 | File | What it is |
 |---|---|
-| [`fashion.py`](fashion.py) | MCP server (standard library only). Tools: `get_profile`, `update_profile`, `image_search`, `product_info`, `save_images`, `save_look`, `rate_look`, `recent_looks` |
+| [`fashion.py`](fashion.py) | MCP server (standard library only). Tools: `get_profile`, `update_profile`, `image_search`, `shopping_search`, `shopping_stores`, `lens_search`, `product_info`, `save_images`, `save_look`, `rate_look`, `recent_looks` |
 | [`skills/fashion-stylist/SKILL.md`](skills/fashion-stylist/SKILL.md) | Hermes skill: the quiz, how to build a look, the reply format, the fortnightly drop, and the stores to use |
 
-It only uses free tools: Hermes's own `web_search` / `web_extract` / `vision_analyze`, plus a free DuckDuckGo image search in the plugin. Prices are in euro, from stores that ship to Ireland.
+By default it only uses free tools: Hermes's own `web_search` / `web_extract` / `vision_analyze`, plus a free DuckDuckGo image search in the plugin. Add a SerpApi key and it also uses Google Shopping and Google Lens (see [Paid search](#paid-search-optional)). Prices are in euro, from stores that ship to Ireland.
 
 ## Install (Hermes in Docker)
 
@@ -121,14 +121,36 @@ It only uses free tools: Hermes's own `web_search` / `web_extract` / `vision_ana
 
 6. Say hi in `#fits`. It starts with the style quiz.
 
+## Paid search (optional)
+
+With a [SerpApi](https://serpapi.com) key, the stylist gets three more tools:
+
+- `shopping_search`: Google Shopping results for Ireland, with real euro prices and a `max_price` filter, so budgets hold. Without a key it falls back to the free image search, which has no prices.
+- `lens_search`: Google Lens. Given the inspiration photo and a piece ("brown loafers"), it finds matching products with full-size photos, so the store photos you take to Vinted match the look. It also works on a photo you send in `#fits` ("find me this").
+- `shopping_stores`: direct store links and prices for a Google Shopping product. It's only used when the store's own page can't be found for free.
+
+Each call uses one SerpApi search. SerpApi's free plan gives 250 searches a month, and a look takes about 6, so it should cost nothing at normal use. The plugin counts its searches and stops using SerpApi after 250 a month, going back to the free tools until the next month. If you move to a paid plan, raise the limit with `FASHION_SERPAPI_MONTHLY_LIMIT` (e.g. `1000` for the $25 plan).
+
+To turn it on:
+
+1. Sign up at [serpapi.com](https://serpapi.com) (free plan, no card) and copy your API key.
+2. Add it to Hermes's `.env`, then restart Hermes:
+
+   ```bash
+   printf '\nSERPAPI_KEY=your-key-here\n' | sudo tee -a ~/.hermes/.env > /dev/null
+   sudo docker restart hermes
+   ```
+
+Photos you send for Lens are uploaded to SerpApi, which accepts at most 500 KB. Bigger photos are shrunk automatically if Pillow is installed in the container; otherwise Lens asks for the photo's web link instead. Only photos in Hermes's cache folders can be uploaded.
+
 ## Where things are kept
 
-- Style profile and past looks: `~/.hermes/fashion/` (`profile.json`, `looks.json`).
+- Style profile and past looks: `~/.hermes/fashion/` (`profile.json`, `looks.json`), plus `serpapi_usage.json` for this month's SerpApi count.
 - Saved photos: `~/.hermes/cache/images/fashion/`. Hermes can only post files from its cache folders. Photos older than 60 days are deleted when the plugin starts; set `FASHION_KEEP_IMAGE_DAYS` to change that.
 
 ## Known limits
 
-- **Image search can pause.** DuckDuckGo shows a bot check if it gets too many searches, and that can last hours. The plugin spaces searches out and stops as soon as it sees a check. Until then, the skill finds products with Hermes's `web_search` instead.
+- **Image search can pause.** DuckDuckGo shows a bot check if it gets too many searches (in testing it lasted under an hour). The plugin spaces searches out and stops as soon as it sees a check. Until then, the skill finds products with Hermes's `web_search`, or with Google Shopping and Lens if paid search is on.
 - **Some stores block reading.** ASOS blocks photo downloads, and ASOS, Zalando, H&M and Mango (and probably others) block `product_info`. The skill then reads prices with `web_extract`, and only suggests ASOS pieces if it can show a photo from elsewhere. Zalando, Zara, Uniqlo, Pinterest and Shopify stores (like END.) photos save fine, and `product_info` reads every photo and price from Shopify stores.
 - It suggests new pieces only; it doesn't know what's in your wardrobe.
 

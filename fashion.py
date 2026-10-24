@@ -7,14 +7,19 @@ Standard library only: no third-party packages. Speaks MCP over stdio
 Hermes does the styling and its own web_search / web_extract. This server
 adds what Hermes can't do on its own:
   - a free image search (DuckDuckGo), to find store photos of a piece
+  - optional paid search through SerpApi (Google Shopping prices, Google Lens
+    photo matching) when SERPAPI_KEY is set; without it, the free search is used
   - reading a product page's name, price and photos, where the store allows it
   - saving photos into Hermes's image cache, so they can be posted in Discord
   - remembering the style profile, past looks and what was liked
 
 Data lives in $HERMES_HOME/fashion/, photos in $HERMES_HOME/cache/images/fashion/.
+SERPAPI_KEY is read from the environment or Hermes's .env file. If Pillow
+happens to be installed, big photos are shrunk to fit Lens's upload limit.
 """
 
 import hashlib
+import io
 import ipaddress
 import json
 import os
@@ -45,6 +50,11 @@ MAX_IMAGE_BYTES = 15 * 1024 * 1024
 SEARCH_GAP_SECONDS = 6.0     # DuckDuckGo starts asking for a bot check on bursts
 SEARCH_PAUSE_SECONDS = 1800  # after it does, leave it alone; the check can last hours
 VERDICTS = ["love", "like", "meh", "dislike"]
+
+SERPAPI = "https://serpapi.com"
+# Stop using SerpApi after this many searches a month; 250 is SerpApi's free plan.
+SERPAPI_MONTHLY_LIMIT = int(os.environ.get("FASHION_SERPAPI_MONTHLY_LIMIT", "250"))
+LENS_UPLOAD_MAX = 500 * 1024  # SerpApi's limit for uploaded photos
 
 
 class ToolError(Exception):
@@ -197,6 +207,212 @@ def image_search(args):
              "site": urllib.parse.urlsplit(r.get("url", "")).hostname or "",
              "size": f"{r.get('width')}x{r.get('height')}"}
             for r in results[:limit] if r.get("image")]
+
+
+# ---------------------------------------------------------------- SerpApi (optional, paid)
+
+NO_KEY = ("{} needs a SerpApi key (SERPAPI_KEY), which isn't set. Use the free tools instead: "
+          "image_search, product_info, web_search, web_extract, and vision_analyze for photos.")
+CURRENCY_SIGNS = {"€": "EUR", "£": "GBP", "$": "USD"}
+
+
+def env_value(name):
+    """A setting from the environment, or from Hermes's .env file."""
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value
+    try:
+        with open(os.path.join(HOME, ".env")) as f:
+            for line in f:
+                key, sep, val = line.strip().partition("=")
+                if sep and key.strip() == name:
+                    value = val.strip().strip("'\"")
+    except OSError:
+        pass
+    return value
+
+
+def serpapi_used():
+    usage = load_json("serpapi_usage.json", {})
+    return usage.get("searches", 0) if usage.get("month") == datetime.now().strftime("%Y-%m") else 0
+
+
+def paid_search_status():
+    return {"enabled": bool(env_value("SERPAPI_KEY")), "used_this_month": serpapi_used(),
+            "monthly_limit": SERPAPI_MONTHLY_LIMIT}
+
+
+def can_use_serpapi():
+    return bool(env_value("SERPAPI_KEY")) and serpapi_used() < SERPAPI_MONTHLY_LIMIT
+
+
+def serpapi_request(req):
+    # Errors never include the request URL: it carries the API key.
+    try:
+        with _opener.open(req, timeout=60) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            data = json.loads(e.read())
+        except ValueError:
+            raise ToolError(f"SerpApi answered HTTP {e.code}.")
+    except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError) as e:
+        raise ToolError(f"Could not reach SerpApi: {getattr(e, 'reason', e)}")
+    except ValueError:
+        raise ToolError("SerpApi sent back something that isn't JSON.")
+    error = data.get("error") if isinstance(data, dict) else None
+    if error and "returned any results" in error:
+        return {}  # an empty search, not a failure
+    if error:
+        raise ToolError(f"SerpApi: {error}")
+    return data
+
+
+def serpapi(what, params):
+    """One SerpApi search; counted toward the monthly limit only when it succeeds."""
+    key = env_value("SERPAPI_KEY")
+    if not key:
+        raise ToolError(NO_KEY.format(what))
+    if serpapi_used() >= SERPAPI_MONTHLY_LIMIT:
+        raise ToolError(f"This month's SerpApi allowance ({SERPAPI_MONTHLY_LIMIT} searches) is used "
+                        "up. Use image_search, web_search and product_info until next month.")
+    query = urllib.parse.urlencode({**params, "api_key": key})
+    data = serpapi_request(urllib.request.Request(f"{SERPAPI}/search?{query}",
+                                                  headers={"Accept": "application/json"}))
+    month = datetime.now().strftime("%Y-%m")
+    usage = load_json("serpapi_usage.json", {})
+    if usage.get("month") != month:
+        usage = {"month": month, "searches": 0}
+    usage["searches"] += 1
+    save_json("serpapi_usage.json", usage)
+    return data
+
+
+def currency_of(price_text):
+    return next((code for sign, code in CURRENCY_SIGNS.items() if sign in str(price_text)), None)
+
+
+def compact(d):
+    return {k: v for k, v in d.items() if v not in (None, "", [])}
+
+
+def shopping_search(args):
+    limit = max(1, min(int(args.get("limit", 8)), 20))
+    if not can_use_serpapi():
+        status = paid_search_status()
+        why = ("this month's SerpApi allowance is used up" if status["enabled"]
+               else "no SerpApi key is set")
+        return {"source": "duckduckgo images (free)",
+                "note": f"Free search because {why}: no prices. Check prices with product_info "
+                        "or web_extract on each result's page.",
+                "results": image_search({"query": args["query"], "limit": limit})}
+
+    params = {"engine": "google_shopping", "q": args["query"], "gl": "ie", "hl": "en",
+              "google_domain": "google.ie"}
+    params.update({k: args[k] for k in ("min_price", "max_price") if args.get(k) is not None})
+    data = serpapi("shopping_search", params)
+    return {"source": "google shopping (SerpApi)", "searches_used_this_month": serpapi_used(),
+            "results": [compact({
+                "title": r.get("title"), "store": r.get("source"), "price": r.get("extracted_price"),
+                "currency": currency_of(r.get("price")), "delivery": r.get("delivery"),
+                "photo": r.get("serpapi_thumbnail") or r.get("thumbnail"),
+                "google_link": r.get("product_link"),
+                "product_token": r.get("immersive_product_page_token")})
+                for r in data.get("shopping_results", [])[:limit]]}
+
+
+def shopping_stores(args):
+    data = serpapi("shopping_stores", {"engine": "google_immersive_product",
+                                       "page_token": args["product_token"]})
+    product = data.get("product_results") or {}
+    return compact({
+        "title": product.get("title"), "brand": product.get("brand"),
+        "photos": (product.get("thumbnails") or [])[:8],
+        "stores": [compact({"store": s.get("name"), "link": s.get("link"),
+                            "price": s.get("extracted_price"), "currency": currency_of(s.get("price")),
+                            "shipping": s.get("shipping"),
+                            "details": ", ".join(map(str, s.get("details_and_offers") or []))})
+                   for s in (product.get("stores") or [])[:8]],
+        "searches_used_this_month": serpapi_used()})
+
+
+def shrink_for_lens(data):
+    try:
+        from PIL import Image
+    except ImportError:
+        raise ToolError("That photo is over 500 KB, the most SerpApi takes as an upload. "
+                        "Pass its web link as image_url instead.")
+    img = Image.open(io.BytesIO(data)).convert("RGB")
+    for side in (1600, 1200, 900, 640):
+        img.thumbnail((side, side))
+        out = io.BytesIO()
+        img.save(out, "JPEG", quality=85)
+        if out.tell() <= LENS_UPLOAD_MAX:
+            return out.getvalue(), "jpg"
+    raise ToolError("Couldn't shrink that photo under 500 KB for Lens.")
+
+
+def upload_for_lens(path):
+    """Upload a photo from Hermes's cache to SerpApi; returns an image_id that lasts 10 minutes."""
+    real = os.path.realpath(path)
+    roots = [os.path.realpath(os.path.join(HOME, d))
+             for d in ("cache", "image_cache", "document_cache")]
+    if not any(real.startswith(root + os.sep) for root in roots):
+        raise ToolError("Only photos in Hermes's cache folder can be sent to Lens.")
+    try:
+        with open(real, "rb") as f:
+            data = f.read(MAX_IMAGE_BYTES + 1)
+    except OSError:
+        raise ToolError(f"Can't read {path}.")
+    ext = image_type(data)
+    if ext not in ("jpg", "png", "webp"):
+        raise ToolError("Lens only takes JPEG, PNG or WebP photos.")
+    if len(data) > LENS_UPLOAD_MAX:
+        data, ext = shrink_for_lens(data)
+
+    boundary = "fashion" + hashlib.sha1(os.urandom(16)).hexdigest()
+    mime = {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp"}[ext]
+    body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"api_key\"\r\n\r\n"
+            f"{env_value('SERPAPI_KEY')}\r\n"
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"image\"; "
+            f"filename=\"photo.{ext}\"\r\nContent-Type: {mime}\r\n\r\n").encode()
+    body += data + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request(f"{SERPAPI}/image", data=body, method="POST", headers={
+        "Content-Type": f"multipart/form-data; boundary={boundary}"})
+    image_id = serpapi_request(req).get("image_id")
+    if not image_id:
+        raise ToolError("SerpApi didn't accept the photo upload.")
+    return image_id
+
+
+def lens_search(args):
+    if not env_value("SERPAPI_KEY"):
+        raise ToolError(NO_KEY.format("lens_search"))
+    limit = max(1, min(int(args.get("limit", 10)), 30))
+    params = {"engine": "google_lens", "type": "visual_matches", "country": "ie", "hl": "en"}
+    if args.get("image_url"):
+        params["url"] = args["image_url"]
+    elif args.get("image_path"):
+        params["image_id"] = upload_for_lens(args["image_path"])
+    else:
+        raise ToolError("Pass image_url (the photo's web link) or image_path (a saved photo).")
+    if args.get("query"):
+        params["q"] = args["query"]
+    data = serpapi("lens_search", params)
+
+    matches = []
+    for m in data.get("visual_matches", [])[:limit]:
+        price, currency = m.get("price"), None  # only some matches have a price
+        if isinstance(price, dict):
+            currency = currency_of(price.get("currency")) or price.get("currency")
+            price = price.get("extracted_value") or price.get("value")
+        elif price is not None:
+            currency = currency_of(price)
+        matches.append(compact({
+            "title": m.get("title"), "store": m.get("source"), "page": m.get("link"),
+            "photo": m.get("image") or m.get("thumbnail"), "price": price, "currency": currency,
+            "in_stock": m.get("in_stock")}))
+    return {"searches_used_this_month": serpapi_used(), "matches": matches}
 
 
 # ---------------------------------------------------------------- product pages
@@ -414,7 +630,8 @@ def get_profile(args):
               "notes": l["rating"].get("notes", "")}
              for l in looks if l.get("rating")][-15:]
     return {"quiz_done": bool(profile.get("quiz_done")), "profile": profile,
-            "looks_so_far": len(looks), "recent_feedback": rated}
+            "looks_so_far": len(looks), "recent_feedback": rated,
+            "paid_search": paid_search_status()}
 
 
 def update_profile(args):
@@ -497,8 +714,9 @@ PIECE = {"type": "object", "properties": {
     "image_path": s("Saved photo path from save_images.")}}
 
 TOOLS = [
-    tool(get_profile, "Get the user's style profile (quiz answers, sizes, budget, likes and dislikes) "
-         "and their recent feedback on looks. Call this before suggesting anything. "
+    tool(get_profile, "Get the user's style profile (quiz answers, sizes, budget, likes and dislikes), "
+         "their recent feedback on looks, and whether paid search (SerpApi) is on and how much "
+         "of this month's allowance is used. Call this before suggesting anything. "
          "quiz_done=false means the style quiz still needs doing.", {}, read_only=True,
          open_world=False),
     tool(update_profile, "Save or change style profile fields. Values replace what was there; "
@@ -514,6 +732,28 @@ TOOLS = [
           "site": s("Only results from this site, e.g. 'zalando.ie' or 'pinterest.com'."),
           "limit": {"type": "integer", "description": "1-25, default 8"}},
          ["query"], read_only=True),
+    tool(shopping_search, "Find products for sale in Ireland with prices. With paid search on, uses "
+         "Google Shopping (1 SerpApi search): title, store, price in euro, a small photo, a Google "
+         "Shopping link and a product_token for shopping_stores. Without it, falls back to the free "
+         "image search, which has no prices.",
+         {"query": s("What to look for, e.g. 'brown suede loafers men'."),
+          "max_price": {"type": "number", "description": "Highest price in euro."},
+          "min_price": {"type": "number", "description": "Lowest price in euro."},
+          "limit": {"type": "integer", "description": "1-20, default 8"}},
+         ["query"], read_only=True),
+    tool(shopping_stores, "Stores selling a Google Shopping product, with direct store links, prices "
+         "and photos. Needs paid search; uses 1 SerpApi search. Use it only when you can't find the "
+         "store's own page another way.",
+         {"product_token": s("product_token from a shopping_search result.")},
+         ["product_token"], read_only=True),
+    tool(lens_search, "Google Lens: find products that look like a photo, with full-size photos and "
+         "product pages (prices only sometimes). Needs paid search; uses 1 SerpApi search. Pass a "
+         "query like 'boots' to focus on one piece of an outfit photo.",
+         {"image_url": s("The photo's web link, e.g. an image link from image_search."),
+          "image_path": s("Or a saved photo in Hermes's cache, e.g. one the user sent."),
+          "query": s("Which piece to match, e.g. 'brown loafers'."),
+          "limit": {"type": "integer", "description": "1-30, default 10"}},
+         read_only=True),
     tool(product_info, "Read a product page: name, brand, price, currency, stock and photo links. "
          "Many big stores block this; if it fails, use web_extract on the page.",
          {"url": s("Product page URL.")}, ["url"], read_only=True),
