@@ -46,7 +46,7 @@ Run these from the repo folder on the server. See the [main README](../README.md
    sudo docker exec -it -u hermes hermes hermes cron create "every 14d" "Post this fortnight's style drop." --skill fashion-stylist --deliver discord:123456789012345678
    ```
 
-6. Say hi in `#fits`. It starts with the style quiz.
+6. In `#fits`, send `/new` (Hermes only loads the stylist skill when a conversation starts there, and the restart doesn't start a new one), then say hi. It starts with the style quiz.
 
 ## Paid search (optional)
 
